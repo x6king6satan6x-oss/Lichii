@@ -281,27 +281,19 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
     };
     area->preemtive = !IsRegionGpuModified(device_addr_start_aligned,
                                            device_addr_end_aligned - device_addr_start_aligned);
-    // A preflushable mark persists and downloads later GPU writes at every fence. Native titles
-    // instead keep read traps and flush on demand.
-    const bool preflush = !Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
+    // The first read of a GPU-written page still flushes below. The mark makes later reads of
+    // that page return without waiting, and QueueFenceDownload copies later GPU writes back at
+    // the fence (only the marked pages; Switch 2 does not download every GPU write).
+    // Leaving Switch 2 unmarked flushed on every read. Ocarina re-reads the same pages
+    // (0x12fdfc000, the 0x2b6xxxxx range) about 80 times a second, and each wait idles the host
+    // GPU: ~22 fps with the card a third busy. One 4 KiB page per read, not the whole buffer.
     if (!area->preemtive) {
         if (Nx2DownloadTrace::g_enabled) [[unlikely]] {
             Nx2DownloadTrace::Marked(device_addr_start_aligned,
-                                     device_addr_end_aligned - device_addr_start_aligned, preflush);
+                                     device_addr_end_aligned - device_addr_start_aligned, true);
         }
-        if (preflush) {
-            memory_tracker.MarkRegionAsPreflushable(
-                device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
-        } else {
-            if constexpr (USE_MEMORY_MAPS) {
-                cpu_read_ranges.Add(area->start_address, area->end_address - area->start_address);
-                download_cpu_read_ranges = true;
-            }
-            // The core consumed this trap before GetFlushArea. Forget it so the next GPU write
-            // really rearms the core instead of being skipped by the deduplication cache.
-            read_trapped_ranges.Subtract(
-                device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
-        }
+        memory_tracker.MarkRegionAsPreflushable(
+            device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
     } else {
         // The core keeps this area and has no mark. The next GPU write here must arm the range
         // again, which ends the area and sets the trap.
