@@ -169,7 +169,18 @@ void TextureCache<P>::RunGarbageCollector() {
             const auto copies = FullDownloadCopies(image.info);
             image.DownloadMemory(map, copies);
             runtime.Finish();
+            // Swizzle writes guest memory and may have to map a sparse block. That map takes the
+            // guest page table lock. If a core holds the lock while it waits for this thread
+            // (OnCPURead), blocking here freezes the process: the log stops on the CPU read and
+            // shutdown cannot join the emulation thread. The map returns instead, and this image
+            // stays until a later pass can write it back.
+            Tegra::Nx2TakeSparseMapContended();
             SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span, swizzle_data_buffer);
+            if (Tegra::Nx2TakeSparseMapContended()) {
+                // The lock is still held. Further write-backs this pass would wait on the same
+                // map, so leave the rest of the images for a later frame.
+                return true;
+            }
             ++gc_download_deletes;
         }
         if (True(image.flags & ImageFlagBits::Tracked)) {

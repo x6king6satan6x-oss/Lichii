@@ -151,6 +151,20 @@ inline void Nx2AddSparseSpan(u64 gpu_address, u64 size) {
     }
 }
 
+/// Set when a host thread could not map sparse backing because the guest page table lock was
+/// held. Sticky until Nx2TakeSparseMapContended, so a collector can keep the image and retry.
+inline thread_local bool t_nx2_sparse_map_contended = false;
+
+inline void Nx2NoteSparseMapContended() {
+    t_nx2_sparse_map_contended = true;
+}
+
+inline bool Nx2TakeSparseMapContended() {
+    const bool contended = t_nx2_sparse_map_contended;
+    t_nx2_sparse_map_contended = false;
+    return contended;
+}
+
 inline void Nx2BackSparseWrite(u64 gpu_address, u64 size, const void* data) {
     if (gpu_address + size <= g_nx2_sparse_low.load(std::memory_order_relaxed) ||
         gpu_address >= g_nx2_sparse_high.load(std::memory_order_relaxed)) [[likely]] {

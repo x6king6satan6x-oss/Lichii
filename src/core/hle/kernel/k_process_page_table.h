@@ -136,8 +136,8 @@ public:
     }
 
     Result MapPageGroup(KProcessAddress addr, const KPageGroup& pg, KMemoryState state,
-                        KMemoryPermission perm) {
-        R_RETURN(m_page_table.MapPageGroup(addr, pg, state, perm));
+                        KMemoryPermission perm, bool wait = true) {
+        R_RETURN(m_page_table.MapPageGroup(addr, pg, state, perm, wait));
     }
 
     Result UnmapPageGroup(KProcessAddress address, const KPageGroup& pg, KMemoryState state) {

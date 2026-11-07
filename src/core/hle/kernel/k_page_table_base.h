@@ -561,8 +561,9 @@ public:
     Result MapPageGroup(KProcessAddress* out_addr, const KPageGroup& pg,
                         KProcessAddress region_start, size_t region_num_pages, KMemoryState state,
                         KMemoryPermission perm);
+    /// `wait` false returns ResultBusy instead of blocking when the table lock is held.
     Result MapPageGroup(KProcessAddress address, const KPageGroup& pg, KMemoryState state,
-                        KMemoryPermission perm);
+                        KMemoryPermission perm, bool wait = true);
     Result UnmapPageGroup(KProcessAddress address, const KPageGroup& pg, KMemoryState state);
 
     Result MakeAndOpenPageGroup(KPageGroup* out, KProcessAddress address, size_t num_pages,

@@ -17,6 +17,11 @@ public:
 
     void Lock();
 
+    /// Acquires the lock only when it is free. A host thread must not take the slow path: that
+    /// parks the thread on the guest scheduler until the owner runs, and the owner can be a guest
+    /// core blocked in the GPU thread (Ocarina of Time, build 93).
+    bool TryLock();
+
     void Unlock();
 
     bool LockSlowPath(uintptr_t owner, uintptr_t cur_thread);

@@ -823,7 +823,8 @@ private:
     // it needs no lock: the GPU back thread calls it without m_region_mutex, because mapping can
     // wait on the guest page table lock and a guest thread holding that lock must not be stalled
     // behind a host mutex the service thread is waiting for.
-    std::optional<MappedBacking> AllocateGpuOnlyBacking(u64 size, bool log_failure, bool clear) {
+    std::optional<MappedBacking> AllocateGpuOnlyBacking(u64 size, bool log_failure, bool clear,
+                                                       bool* contended = nullptr) {
         using Core::Memory::YUZU_PAGESIZE;
         auto& kernel_core = system.Kernel();
         auto* const process = system.ApplicationProcess();
@@ -856,24 +857,45 @@ private:
         const u64 region_start = GetInteger(page_table.GetAliasCodeRegionStart());
         const u64 region_size = page_table.GetAliasCodeRegionSize();
         constexpr u64 Alignment = 0x200000; // 2 MiB
+        // A host thread (GPU, fencing) is a dummy kernel thread. MapPageGroup's lock waits by
+        // parking that thread until the owner guest core runs. Ocarina's collector holds the
+        // texture cache lock across the swizzle that gets here, and the core that owns the page
+        // table lock is blocked in OnCPURead until this thread finishes: waiting deadlocks the
+        // process (build 93, window frozen, emulation thread will not stop). Try once; the caller
+        // leaves the block empty and retries.
+        const bool wait_for_page_table = !Kernel::GetCurrentThread(kernel_core).IsDummyThread();
         // From where the last backing went (sparse regions back hundreds of blocks), then wrapping.
         const u64 slots = region_size / Alignment;
+        bool map_contended = false;
         for (u64 i = 0; i < slots; ++i) {
             const u64 offset = ((m_alias_hint.load(std::memory_order_relaxed) + i) % slots) * Alignment;
             if (offset + size > region_size) {
                 continue;
             }
             const Common::ProcessAddress address{region_start + offset};
-            if (R_SUCCEEDED(page_table.MapPageGroup(address, *pg, Kernel::KMemoryState::IoMemory,
-                                                    Kernel::KMemoryPermission::UserReadWrite))) {
+            const Result map_result = page_table.MapPageGroup(
+                address, *pg, Kernel::KMemoryState::IoMemory,
+                Kernel::KMemoryPermission::UserReadWrite, wait_for_page_table);
+            if (map_result == Kernel::ResultBusy) {
+                map_contended = true;
+                break;
+            }
+            if (R_SUCCEEDED(map_result)) {
                 m_alias_hint.store((offset + Common::AlignUp(size, Alignment)) / Alignment,
                                    std::memory_order_relaxed);
                 return MappedBacking{GetInteger(address), size, std::move(pg)};
             }
         }
+        pg->Close(kernel_core);
+        if (map_contended) {
+            if (contended) {
+                *contended = true;
+            }
+            Tegra::Nx2NoteSparseMapContended();
+            return std::nullopt;
+        }
         LOG_ERROR(Service, "nx2:gpu 214 no room for {:#x} bytes in the alias code region "
                            "[{:#x}, +{:#x})", size, region_start, region_size);
-        pg->Close(kernel_core);
         return std::nullopt;
     }
 
@@ -989,7 +1011,8 @@ private:
                     block_size = (std::min)(SparseBlockSize, it->second.size - block * SparseBlockSize);
                 }
             }
-            auto backing = AllocateGpuOnlyBacking(block_size, false, true);
+            bool block_contended = false;
+            auto backing = AllocateGpuOnlyBacking(block_size, false, true, &block_contended);
             bool stale = false;
             {
                 std::scoped_lock lk{m_region_mutex};
@@ -1001,6 +1024,10 @@ private:
                     stale = true;
                     it->second.blocks[block] = BlockWritten;
                     Tegra::Nx2SparseBlockWritten(start, block);
+                } else if (block_contended) {
+                    // The page table lock was busy. Leave the block empty so the next write retries
+                    // instead of dropping every later write to it.
+                    it->second.blocks[block] = BlockEmpty;
                 } else if (!backing) {
                     auto& region = it->second;
                     region.blocks[block] = BlockFailed; // out of memory: not again for every write
@@ -1040,16 +1067,22 @@ private:
         }
         if (waits_for_other) {
             // Another thread is backing a block this write needs: wait until it is done.
-            std::unique_lock lk{m_region_mutex};
-            m_region_cv.wait(lk, [&] {
-                bool pending = false;
-                for_regions([&](u64, SparseRegion& region, u64 first, u64 last) {
-                    for (u64 block = first; block <= last; ++block) {
-                        pending |= region.blocks[block] == BlockPending;
-                    }
+            // A host thread must not wait. The other mapper can be blocked in MapPageGroup on a
+            // guest core that itself waits for this thread (the same cycle as above).
+            if (Kernel::GetCurrentThread(system.Kernel()).IsDummyThread()) {
+                Tegra::Nx2NoteSparseMapContended();
+            } else {
+                std::unique_lock lk{m_region_mutex};
+                m_region_cv.wait(lk, [&] {
+                    bool pending = false;
+                    for_regions([&](u64, SparseRegion& region, u64 first, u64 last) {
+                        for (u64 block = first; block <= last; ++block) {
+                            pending |= region.blocks[block] == BlockPending;
+                        }
+                    });
+                    return !pending;
                 });
-                return !pending;
-            });
+            }
         }
     }
 
