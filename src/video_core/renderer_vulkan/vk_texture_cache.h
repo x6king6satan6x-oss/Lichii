@@ -110,6 +110,14 @@ public:
 
     u64 GetDeviceMemorySlack() const;
 
+    /// Driver/VMA usage in the same units as GetDeviceMemoryBudget(), including allocator slack.
+    u64 GetDeviceMemoryBudgetUsage() const;
+
+    /// Called when an image allocation does not fit, before the unbacked fallback.
+    void SetMemoryReclaim(bool (*callback)(void*), void* user) noexcept {
+        memory_allocator.SetReclaimCallback(callback, user);
+    }
+
     bool CanReportMemoryUsage() const;
 
     /// Images that did not fit the device memory budget so far (see MemoryAllocator).

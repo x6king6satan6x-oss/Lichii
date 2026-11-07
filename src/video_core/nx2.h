@@ -299,6 +299,27 @@ inline std::vector<std::pair<u64, u64>> Nx2SparseDataRanges(u64 gpu_address, u64
     return ranges;
 }
 
+/// Bytes from gpu_address to the end of the sparse region that contains it, or 0 when it
+/// does not. A texture array whose guest size runs past this was sized from a depth field
+/// the region does not hold.
+inline u64 Nx2SparseRegionTail(u64 gpu_address) {
+    if (gpu_address + 1 <= g_nx2_sparse_low.load(std::memory_order_relaxed) ||
+        gpu_address >= g_nx2_sparse_high.load(std::memory_order_relaxed)) [[likely]] {
+        return 0;
+    }
+    std::scoped_lock lk{g_nx2_sparse_state_mutex};
+    auto it = g_nx2_sparse_state.upper_bound(gpu_address);
+    if (it == g_nx2_sparse_state.begin()) {
+        return 0;
+    }
+    --it;
+    const u64 end = it->first + it->second.size;
+    if (gpu_address >= end) {
+        return 0;
+    }
+    return end - gpu_address;
+}
+
 /// True when [gpu_address, +size) lies in one sparse region.
 inline bool Nx2InSparseRegion(u64 gpu_address, u64 size) {
     if (size == 0 || gpu_address + size <= g_nx2_sparse_low.load(std::memory_order_relaxed) ||

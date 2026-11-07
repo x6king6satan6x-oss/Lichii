@@ -384,8 +384,15 @@ private:
 
     void OnGPUASRegister(size_t map_id) final override;
 
-    /// Runs the Garbage Collector.
-    void RunGarbageCollector();
+    /// Runs the Garbage Collector. `force_aggressive` collects even when the slack-subtracted
+    /// usage figure is still under the threshold (the driver's heap can already be full).
+    void RunGarbageCollector(bool force_aggressive = false);
+
+    /// Allocation failed: collect, wait out the GPU, and free the deleted images' memory.
+    bool ReclaimDeviceMemory();
+
+    /// Shrinks an array whose guest size runs past its sparse region or mapped range.
+    void ClampOversizedArray(ImageInfo& info, GPUVAddr gpu_addr);
 
     /// Find or create an image view in the guest descriptor table
     ImageViewId VisitImageView(u32 index, bool compute);
@@ -557,6 +564,7 @@ private:
     [[nodiscard]] std::optional<DAddr> ImageCpuAddress(GPUVAddr gpu_addr, size_t size) const;
 
     bool has_deleted_images = false;
+    bool memory_reclaim_active = false;
     /// True while a clear binds its render targets (UpdateRenderTargets(true)), so JoinImages can
     /// skip the upload of a new target the clear overwrites whole.
     bool clearing_render_targets = false;

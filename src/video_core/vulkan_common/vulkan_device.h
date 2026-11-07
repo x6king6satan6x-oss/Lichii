@@ -1055,6 +1055,10 @@ FN_MAX_LIMIT_LIST
     /// yet the driver does: with the heap at its budget it is not available to new images.
     u64 GetDeviceMemorySlack() const;
 
+    /// Usage in GetDeviceMemoryBudget()'s units, counting allocator slack that
+    /// GetDeviceMemoryUsage() leaves out. Comparable to the budget: at it, new images fail.
+    u64 GetDeviceMemoryBudgetUsage() const;
+
     u32 GetSetsPerPool() const {
         return sets_per_pool;
     }
