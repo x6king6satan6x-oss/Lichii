@@ -2925,7 +2925,7 @@ Result KPageTableBase::MapPageGroup(KProcessAddress* out_addr, const KPageGroup&
 }
 
 Result KPageTableBase::MapPageGroup(KProcessAddress addr, const KPageGroup& pg, KMemoryState state,
-                                    KMemoryPermission perm) {
+                                    KMemoryPermission perm, bool wait) {
     ASSERT(!this->IsLockedByCurrentThread());
 
     // Ensure this is a valid map request.
@@ -2933,8 +2933,16 @@ Result KPageTableBase::MapPageGroup(KProcessAddress addr, const KPageGroup& pg, 
     const size_t size = num_pages * PageSize;
     R_UNLESS(this->CanContain(addr, size, state), ResultInvalidCurrentMemory);
 
-    // Lock the table.
-    KScopedLightLock lk(m_general_lock);
+    // Lock the table. Host threads pass wait=false: the slow path parks them on the guest
+    // scheduler, and the owner can be a core blocked waiting for this thread.
+    if (wait) {
+        m_general_lock.Lock();
+    } else if (!m_general_lock.TryLock()) {
+        R_THROW(ResultBusy);
+    }
+    SCOPE_EXIT {
+        m_general_lock.Unlock();
+    };
 
     // Check if state allows us to map.
     size_t num_allocator_blocks;

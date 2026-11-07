@@ -91,7 +91,7 @@ GpuSplit GpuSplit::instance;
 void GpuSplit::MaybeStart(Core::System& system_) {
     static const char mode = [] {
         const char* value = std::getenv("EDEN_NX2_SPLIT");
-        return value != nullptr ? value[0] : '2';
+        return value != nullptr ? value[0] : '0';
     }();
     const bool wanted = mode == '1' || mode == '2';
     if (!wanted || !Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
@@ -412,6 +412,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     back_running.store(true, std::memory_order_release);
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
     Common::SetCurrentThreadToPerformanceCores();
+    Common::PinCurrentThread(Common::PinnedRole::GpuBack);
     system->RegisterHostThread();
 #ifdef _WIN32
     g_back_thread_id.store(GetCurrentThreadId(), std::memory_order_relaxed);

@@ -206,6 +206,21 @@ MemoryAllocator::MemoryAllocator(const Device &device_)
 
 MemoryAllocator::~MemoryAllocator() = default;
 
+bool MemoryAllocator::TryReclaim() const {
+    if (reclaiming || reclaim_callback == nullptr) {
+        return false;
+    }
+    reclaiming = true;
+    try {
+        const bool freed = reclaim_callback(reclaim_user);
+        reclaiming = false;
+        return freed;
+    } catch (...) {
+        reclaiming = false;
+        throw;
+    }
+}
+
 vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicated) const
 {
     const VmaAllocationCreateInfo alloc_ci = {
@@ -235,20 +250,38 @@ vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicat
     VkResult result = huge ? VK_ERROR_OUT_OF_DEVICE_MEMORY
                            : vmaCreateImage(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
-        // Over the device memory budget (Switch 2 titles fill 8 GB cards): let the driver page
-        // it out rather than failing the draw and aborting.
+        // Over the device memory budget (Switch 2 titles fill 8 GB cards). Collect and retry
+        // before allocating past the budget or falling back to an unbacked image: Ocarina of
+        // Time's map died on that fallback, and a burst of later failures must not each wait
+        // out the GPU.
         static u32 logged{};
         if (logged++ < 32) {
             LOG_WARNING(Render_Vulkan,
                         "Image {}x{}x{} ({} levels, {} layers, format {}) is over the memory "
-                        "budget; allocating it anyway",
+                        "budget",
                         ci.extent.width, ci.extent.height, ci.extent.depth, ci.mipLevels,
                         ci.arrayLayers, static_cast<u32>(ci.format));
         }
         pressure_events.fetch_add(1, std::memory_order_relaxed);
-        VmaAllocationCreateInfo relaxed = alloc_ci;
-        relaxed.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
-        result = vmaCreateImage(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
+        if (!reclaiming && reclaim_cooldown == 0) {
+            reclaim_cooldown = 48;
+            if (TryReclaim()) {
+                handle = VK_NULL_HANDLE;
+                allocation = VK_NULL_HANDLE;
+                result = vmaCreateImage(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
+                if (result == VK_SUCCESS) {
+                    reclaim_cooldown = 0;
+                }
+            }
+        } else if (reclaim_cooldown > 0) {
+            --reclaim_cooldown;
+        }
+        if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+            // Still over the budget: let the driver page it out rather than failing the draw.
+            VmaAllocationCreateInfo relaxed = alloc_ci;
+            relaxed.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+            result = vmaCreateImage(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
+        }
     }
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
         // Still out of device memory: a real image in host memory (slow, but valid) beats one

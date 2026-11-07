@@ -207,7 +207,12 @@ constexpr VkBorderColor ConvertBorderColor(const std::array<float, 4>& color) {
         (!IsPixelFormatASTC(info.format) &&
          (!IsPixelFormatBCn(info.format) || device.IsOptimalBcnSupported()));
     const u32 size = VideoCommon::CalculateGuestSizeInBytes(info);
-    return layer_uploads && size >= (32U << 20) && Tegra::Nx2InSparseRegion(gpu_addr, size);
+    // A hardware-sparse array that is not an nx2:gpu region (Ocarina of Time's map) is still
+    // only partly resident. Allocating every layer fails the budget and becomes an unbacked
+    // image the next GPU write cannot fill.
+    const bool virtual_sparse = info.is_sparse && info.resources.layers > 1 && size >= (64U << 20);
+    return layer_uploads && size >= (32U << 20) &&
+           (Tegra::Nx2InSparseRegion(gpu_addr, size) || virtual_sparse);
 }
 
 // How SparseTiles images leave the blocks without data: unbound (reads give zero), or all bound to
@@ -2761,6 +2766,10 @@ u64 TextureCacheRuntime::GetDeviceMemoryBudget() const {
 
 u64 TextureCacheRuntime::GetDeviceMemorySlack() const {
     return device.GetDeviceMemorySlack();
+}
+
+u64 TextureCacheRuntime::GetDeviceMemoryBudgetUsage() const {
+    return device.GetDeviceMemoryBudgetUsage();
 }
 
 bool TextureCacheRuntime::CanDownloadMsaa(const VideoCommon::ImageInfo& info) const {

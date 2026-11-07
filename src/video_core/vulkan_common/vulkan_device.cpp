@@ -1751,6 +1751,36 @@ u64 Device::GetDeviceMemorySlack() const {
     return statistics.blockBytes - (std::min)(statistics.blockBytes, statistics.allocationBytes);
 }
 
+u64 Device::GetDeviceMemoryBudgetUsage() const {
+    if (!extensions.memory_budget) {
+        return 0;
+    }
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{};
+    budget.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+    physical.GetMemoryProperties(&budget);
+    std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> heap_budgets{};
+    if (allocator != nullptr) {
+        vmaGetHeapBudgets(allocator, heap_budgets.data());
+    }
+    // Main heap: the driver's usage and VMA's, whichever is higher, including unused bytes
+    // inside allocator blocks. GetDeviceMemoryUsage() subtracts those, so the collector can
+    // sit under its threshold while this heap is already at its budget.
+    const auto heap_usage = [&](size_t heap) -> u64 {
+        const u64 driver = budget.heapUsage[heap];
+        if (allocator == nullptr) {
+            return driver;
+        }
+        return (std::max)(driver, static_cast<u64>(heap_budgets[heap].usage));
+    };
+    u64 result = heap_usage(main_heap);
+    for (const size_t heap : valid_heap_memory) {
+        if (heap != main_heap) {
+            result += AllocatedUsage(budget.heapUsage[heap], heap_budgets[heap]);
+        }
+    }
+    return result;
+}
+
 u64 Device::GetDeviceMemoryBudget() const {
     if (!extensions.memory_budget) {
         return 0;

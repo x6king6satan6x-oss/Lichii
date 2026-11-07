@@ -343,7 +343,14 @@ void Puller::ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument) {
         });
         return;
     }
-    // Acquires: check once after flushing pending fences; never block the GPU thread on them.
+    // Acquires: the word is only logged below, and a miss still continues. With the split, release
+    // fences on the back instead of draining it first (Frizti/Lichii, GPL-3; the SEM_FAST overlay
+    // that skips drains of already-met values stays off, it flickered Link's house ladder).
+    if (VideoCommon::GpuSplit::Get().Active()) {
+        OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); });
+        VideoCommon::GpuSplit::Get().NoteSync();
+        return;
+    }
     DrainBack();
     ReleaseFences(dma_pusher);
     const u32 word = dma_pusher.memory_manager.Read<u32>(address);

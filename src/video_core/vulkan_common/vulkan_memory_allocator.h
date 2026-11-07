@@ -133,6 +133,13 @@ namespace Vulkan {
             return pressure_events.load(std::memory_order_relaxed);
         }
 
+        /// Invoked once when an image does not fit, before the unbacked fallback. The callback
+        /// collects and frees device memory; the allocation is then tried again.
+        void SetReclaimCallback(bool (*callback)(void*), void* user) noexcept {
+            reclaim_callback = callback;
+            reclaim_user = user;
+        }
+
         vk::Buffer CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage) const;
 
         vk::Buffer CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage,
@@ -169,6 +176,14 @@ namespace Vulkan {
         VkDeviceSize buffer_image_granularity;            ///< Adjacent buffer/image granularity
         u32 valid_memory_types{~0u};
         mutable std::atomic<u32> pressure_events{0};
+        bool (*reclaim_callback)(void*){};
+        void* reclaim_user{};
+        mutable bool reclaiming{false};
+        mutable u32 reclaim_cooldown{0};
+
+        /// Collects device memory and reports whether the caller should retry. False while a
+        /// reclaim is already running, so the collector's own allocations cannot recurse.
+        bool TryReclaim() const;
         mutable std::mutex buffer_type_mutex;
         /// Memory type of device-local buffers by usage and flags (CreateBufferInSeparatePool).
         mutable std::unordered_map<u64, u32> buffer_memory_types;

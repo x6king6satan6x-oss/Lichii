@@ -5,9 +5,12 @@
 // SPDX-FileCopyrightText: 2014 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "common/adpf.h"
 #include "common/error.h"
@@ -539,6 +542,72 @@ void SetCurrentThreadName(const char* name) {
 #endif
 }
 
+#ifdef _WIN32
+struct PhysicalCore {
+    KAFFINITY mask;
+    BYTE efficiency; ///< Higher is the more performant class (P-cores above E-cores).
+};
+
+const std::vector<PhysicalCore>& PhysicalCores() {
+    static const std::vector<PhysicalCore> cores = [] {
+        std::vector<PhysicalCore> result;
+        DWORD length = 0;
+        GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &length);
+        if (length == 0) {
+            return result;
+        }
+        std::vector<u8> buffer(length);
+        auto* info = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data());
+        if (!GetLogicalProcessorInformationEx(RelationProcessorCore, info, &length)) {
+            return result;
+        }
+        for (DWORD offset = 0; offset < length;) {
+            auto* entry =
+                reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data() + offset);
+            if (entry->Relationship == RelationProcessorCore && entry->Processor.GroupCount > 0 &&
+                entry->Processor.GroupMask[0].Group == 0) {
+                result.push_back(
+                    {entry->Processor.GroupMask[0].Mask, entry->Processor.EfficiencyClass});
+            }
+            offset += entry->Size;
+        }
+        std::stable_sort(result.begin(), result.end(),
+                         [](const PhysicalCore& lhs, const PhysicalCore& rhs) {
+                             return lhs.efficiency > rhs.efficiency;
+                         });
+        return result;
+    }();
+    return cores;
+}
+
+/// Performance cores only: the highest efficiency class. Every core, when the CPU has one class.
+const std::vector<PhysicalCore>& PerformanceCores() {
+    static const std::vector<PhysicalCore> cores = [] {
+        const auto& all = PhysicalCores();
+        if (all.empty()) {
+            return std::vector<PhysicalCore>{};
+        }
+        const BYTE best = all.front().efficiency;
+        std::vector<PhysicalCore> fast;
+        for (const PhysicalCore& core : all) {
+            if (core.efficiency == best) {
+                fast.push_back(core);
+            }
+        }
+        return fast;
+    }();
+    return cores;
+}
+
+KAFFINITY PerformanceMask() {
+    KAFFINITY mask = 0;
+    for (const PhysicalCore& core : PerformanceCores()) {
+        mask |= core.mask;
+    }
+    return mask;
+}
+#endif
+
 void SetCurrentThreadToPerformanceCores() {
 #if defined(__ANDROID__)
     if (ADPF::AddCurrentThread(ADPF::Session::Render)) {
@@ -546,6 +615,70 @@ void SetCurrentThreadToPerformanceCores() {
         return;
     }
     SetCurrentThreadCoreGroup(CoreGroup::Performance);
+#elif defined(_WIN32)
+    // Hybrid Intel (6 P-cores + E-cores): keep emulation threads off the efficiency cores.
+    // A later PinCurrentThread narrows the GPU halves and the guest cores further.
+    if (const KAFFINITY mask = PerformanceMask(); mask != 0) {
+        SetThreadAffinityMask(GetCurrentThread(), mask);
+    }
+#endif
+}
+
+void PinCurrentThread(PinnedRole role) {
+#ifdef _WIN32
+    // From Frizti/Lichii (GPL-3), retargeted at performance cores. Off with
+    // EDEN_NX2_PIN_THREADS=0. On by default once there are four P-cores: an i5-13400F has six,
+    // so the GPU halves do not share a core with each other or with an E-core.
+    static const char* const setting = std::getenv("EDEN_NX2_PIN_THREADS");
+    if (setting != nullptr && setting[0] == '0') {
+        return;
+    }
+    const auto& fast = PerformanceCores();
+    const bool forced = setting != nullptr && setting[0] == '1';
+    if (!forced && fast.size() < 4) {
+        return;
+    }
+    if (fast.size() < 2) {
+        return;
+    }
+    // The first P-core takes most interrupts. The GPU threads get the next two.
+    const size_t gpu_base = fast.size() >= 3 ? 1 : 0;
+    const KAFFINITY front = fast[gpu_base].mask;
+    const KAFFINITY back = fast[(std::min)(gpu_base + 1, fast.size() - 1)].mask;
+    KAFFINITY mask = 0;
+    switch (role) {
+    case PinnedRole::GpuFront:
+        mask = front;
+        break;
+    case PinnedRole::GpuBack:
+        mask = back;
+        break;
+    case PinnedRole::GuestCore:
+        for (const PhysicalCore& core : fast) {
+            mask |= core.mask;
+        }
+        mask &= ~(front | back);
+        if (mask == 0) {
+            for (const PhysicalCore& core : PhysicalCores()) {
+                mask |= core.mask;
+            }
+            mask &= ~(front | back);
+        }
+        break;
+    }
+    if (mask != 0) {
+        SetThreadAffinityMask(GetCurrentThread(), mask);
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1) < 3) {
+            LOG_INFO(Common, "Pinned {} to performance-core mask {:#x} ({} P-cores)",
+                     role == PinnedRole::GpuFront   ? "GPU front"
+                     : role == PinnedRole::GpuBack ? "GPU back"
+                                                   : "guest core",
+                     mask, fast.size());
+        }
+    }
+#else
+    (void)role;
 #endif
 }
 

@@ -112,6 +112,12 @@ void SetCurrentThreadToEfficiencyCores();
 void SetCurrentThreadToBackgroundWork();
 void SetCurrentThreadToAllCores();
 
+/// Windows, EDEN_NX2_PIN_THREADS (default on with enough P-cores): the split GPU thread's two
+/// halves each get their own performance core, and guest cores stay on the other P-cores.
+/// EDEN_NX2_PIN_THREADS=0 leaves placement to the OS.
+enum class PinnedRole : u32 { GpuFront, GpuBack, GuestCore };
+void PinCurrentThread(PinnedRole role);
+
 void RefreshThreadPolicies();
 void PollThreadPolicies();
 
