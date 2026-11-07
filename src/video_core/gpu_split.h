@@ -162,6 +162,18 @@ public:
     void NoteWriter() {
         last_writer_position = write_position;
     }
+    /// A 3D report, inline upload or launch DMA was just sent. Macro DMA snapshots treat it as a
+    /// possible writer of every page, the same way compute and copies are.
+    void NoteReportWriter() {
+        last_report_position = write_position;
+    }
+    [[nodiscard]] u64 SentPosition() const {
+        return write_position;
+    }
+    /// True when compute, a copy or a report was sent after `since` (a DMA snapshot's position).
+    [[nodiscard]] bool MayBeWrittenSince(u64 since) const {
+        return last_writer_position > since || last_report_position > since;
+    }
     /// Waits until the back executed the compute and copy work sent so far (not what came after).
     /// Returns whether any of it was still queued.
     bool WaitForWriters();
@@ -246,6 +258,7 @@ private:
     // Front side.
     u64 write_position{};
     u64 last_writer_position{};
+    u64 last_report_position{};
     u64 last_sync_position{};
     u64 published_local{};
     u64 consumed_cache{};

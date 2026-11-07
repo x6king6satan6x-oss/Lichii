@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -1165,6 +1166,17 @@ void PipelineCache::EvictUnusedPipelines() {
     // this long is destroyed; it takes 2-3 ms to build again from the driver's pipeline cache.
     constexpr u64 EvictAfterFrames = 9000;
     if (frame_count <= EvictAfterFrames) {
+        return;
+    }
+    // Only while the cache is large. Ocarina kept about 1,900 pipelines and then rebuilt the ones
+    // eviction had dropped, several seconds of GPU-thread stalls. 8,000 is the cap from
+    // Frizti/Lichii (GPL-3). EDEN_NX2_PIPELINE_EVICT_ABOVE sets it; 0 keeps every pipeline.
+    static const size_t evict_above = [] {
+        const char* value = std::getenv("EDEN_NX2_PIPELINE_EVICT_ABOVE");
+        return value != nullptr ? static_cast<size_t>(std::strtoull(value, nullptr, 10))
+                                : size_t{8000};
+    }();
+    if (evict_above != 0 && graphics_cache.size() <= evict_above) {
         return;
     }
     const u64 cutoff = frame_count - EvictAfterFrames;
